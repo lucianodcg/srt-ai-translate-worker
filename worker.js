@@ -6,10 +6,18 @@ addEventListener('fetch', event => {
 async function handleRequest(request) {
     try {
         if (request.method === 'GET') {
-            // Serve the HTML form with translation UI
             return new Response(htmlForm(), {
-                headers: { 'Content-Type': 'text/html' }
+                headers: { 
+                    'Content-Type': 'text/html',
+                    'Cache-Control': 'no-store' 
+                }
             });
+        } else if (request.method === 'POST') {
+            const formData = await request.formData();
+            if (!formData.get('file') || !formData.get('api_key')) {
+                return new Response('Missing required fields', { status: 400 });
+            }
+            return new Response('Processing on client-side', { status: 200 });
         } else {
             return new Response('Method not allowed', { status: 405 });
         }
@@ -18,7 +26,7 @@ async function handleRequest(request) {
     }
 }
 
-// HTML form with translation UI and progress bar
+// HTML form with translation UI, progress bar, and chunk setting
 function htmlForm() {
     return `
     <!DOCTYPE html>
@@ -104,7 +112,8 @@ function htmlForm() {
         }
 
         input[type="text"]:focus,
-        input[type="password"]:focus {
+        input[type="password"]:focus,
+        input[type="number"]:focus {
             border-color: #007bff;
             background: rgba(255, 255, 255, 0.15);
             outline: none;
@@ -252,9 +261,9 @@ function htmlForm() {
 </head>
 <body>
     <div class="container">
-        <h1>SRT Translator to to Any Language</h1>
+        <h1>SRT Translator to Any Language</h1>
         <p style="color: #ff4444; font-weight: bold;">⚠️ Please use a VPN to access the Gemini API, as Iran is currently under sanctions.</p>
-        <p>Upload an SRT file and provide your Gemini API key to translate the text to to Any Language.</p>
+        <p>Upload an SRT file and provide your Gemini API key to translate the text to any language.</p>
         <form id="translate-form" onsubmit="return handleTranslate(event)">
             <label for="file">Upload SRT File:</label>
             <input type="file" id="file" name="file" accept=".srt" required>
@@ -273,6 +282,8 @@ function htmlForm() {
             <input type="number" id="base_delay" name="base_delay" min="100" value="4000" placeholder="Base delay in milliseconds" required>
             <label for="quota_delay">Quota Delay (ms):</label>
             <input type="number" id="quota_delay" name="quota_delay" min="1000" value="60000" placeholder="Quota delay in milliseconds" required>
+            <label for="chunk_count">Number of Chunks:</label>
+            <input type="number" id="chunk_count" name="chunk_count" min="1" value="1" placeholder="Number of chunks" required>
             <label for="lang">Language:</label>
             <input type="text" id="lang" name="lang" value="Persian (Farsi)" placeholder="Language:">
             <button type="submit">Translate</button>
@@ -342,13 +353,30 @@ function htmlForm() {
             return parsedEntries;
         }
 
-        async function translateText(text, apiKey, baseDelay, quotaDelay, lang) {
+        function splitIntoChunks(array, chunkCount) {
+            const chunks = [];
+            const baseChunkSize = Math.floor(array.length / chunkCount);
+            let remainder = array.length % chunkCount;
+            let start = 0;
+
+            for (let i = 0; i < chunkCount; i++) {
+                const chunkSize = baseChunkSize + (remainder > 0 ? 1 : 0);
+                chunks.push(array.slice(start, start + chunkSize));
+                start += chunkSize;
+                if (remainder > 0) remainder--;
+            }
+            return chunks;
+        }
+
+        async function translateChunk(chunk, apiKey, baseDelay, quotaDelay, lang, chunkIndex) {
             const url = \`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=\${apiKey}\`;
             const headers = { 'Content-Type': 'application/json' };
+            const combinedText = chunk.map(entry => entry.text).join('\\n---\\n');
+            console.log(\`Chunk \${chunkIndex} input (length: \${combinedText.length}): \${combinedText}\`);
             const payload = {
                 contents: [{
                     parts: [{
-                        text: \`Translate the following text to \`+lang+\`. Return only the translated text, nothing else:\\n\\n\${text}\`
+                        text: \`Translate the following text to \${lang}. Return only the translated text, maintaining the same number of lines separated by "---", nothing else:\\n\\n\${combinedText}\`
                     }]
                 }]
             };
@@ -379,18 +407,27 @@ function htmlForm() {
                     }
 
                     await new Promise(resolve => setTimeout(resolve, baseDelay));
-                    return data.candidates[0].content.parts[0].text.trim();
+                    const translatedText = data.candidates[0].content.parts[0].text.trim();
+                    console.log(\`Chunk \${chunkIndex} response: \${translatedText}\`);
+                    const translatedLines = translatedText.split('---');
+                    if (translatedLines.length !== chunk.length) {
+                        throw new Error(\`Translation response does not match chunk entry count (expected \${chunk.length}, got \${translatedLines.length})\`);
+                    }
+                    return translatedLines;
                 } catch (error) {
                     attempts++;
                     if (attempts < maxAttempts) {
                         let delay;
                         if (error.message.includes('503')) {
                             delay = Math.pow(2, attempts) * baseDelay;
-                            console.log(\`Retry attempt \${attempts} for 503: Waiting \${delay / 1000}s\`);
+                            console.log(\`Retry attempt \${attempts} for 503 in chunk \${chunkIndex}: Waiting \${delay / 1000}s\`);
                         } else if (error.message.includes('429')) {
                             delay = quotaDelay;
-                            console.log(\`Retry attempt \${attempts} for 429: Waiting \${delay / 1000}s\`);
+                            console.log(\`Retry attempt \${attempts} for 429 in chunk \${chunkIndex}: Waiting \${delay / 1000}s\`);
                             throw new Error(\`Quota exceeded. Waiting \${delay / 1000} seconds before retrying...\`);
+                        } else if (error.message.includes('Translation response does not match chunk entry count')) {
+                            delay = baseDelay;
+                            console.log(\`Retry attempt \${attempts} for mismatched response in chunk \${chunkIndex}: Waiting \${delay / 1000}s\`);
                         } else {
                             throw error;
                         }
@@ -412,116 +449,162 @@ function htmlForm() {
         }
 
         async function handleTranslate(event) {
-            event.preventDefault();
+    event.preventDefault();
 
-            const fileInput = document.getElementById('file');
-            const apiKey = document.getElementById('api_key').value;
-            const lang = document.getElementById('lang').value;
-            const baseDelay = parseInt(document.getElementById('base_delay').value, 10);
-            const quotaDelay = parseInt(document.getElementById('quota_delay').value, 10);
-            const progressContainer = document.getElementById('progress-container');
-            const progressBar = document.getElementById('progress');
-            const progressText = document.getElementById('progress-text');
-            const downloadLink = document.getElementById('download-link');
-            const errorMessage = document.getElementById('error-message');
-            const submitButton = document.querySelector('button[type="submit"]');
+    const fileInput = document.getElementById('file');
+    const apiKey = document.getElementById('api_key').value;
+    const lang = document.getElementById('lang').value;
+    const baseDelay = parseInt(document.getElementById('base_delay').value, 10);
+    const quotaDelay = parseInt(document.getElementById('quota_delay').value, 10);
+    const chunkCount = parseInt(document.getElementById('chunk_count').value, 10);
+    const progressContainer = document.getElementById('progress-container');
+    const progressBar = document.getElementById('progress');
+    const progressText = document.getElementById('progress-text');
+    const downloadLink = document.getElementById('download-link');
+    const errorMessage = document.getElementById('error-message');
+    const submitButton = document.querySelector('button[type="submit"]');
 
-            // Validate inputs
-            if (isNaN(baseDelay) || baseDelay < 100) {
-                errorMessage.textContent = 'Base delay must be at least 100ms.';
-                errorMessage.style.display = 'block';
-                return false;
-            }
-            if (isNaN(quotaDelay) || quotaDelay < 1000) {
-                errorMessage.textContent = 'Quota delay must be at least 1000ms.';
-                errorMessage.style.display = 'block';
-                return false;
-            }
-            if (!fileInput.files[0]) {
-                errorMessage.textContent = 'Please upload an SRT file.';
-                errorMessage.style.display = 'block';
-                return false;
-            }
+    // Validate inputs
+    if (isNaN(baseDelay) || baseDelay < 100) {
+        errorMessage.textContent = 'Base delay must be at least 100ms.';
+        errorMessage.style.display = 'block';
+        return false;
+    }
+    if (isNaN(quotaDelay) || quotaDelay < 1000) {
+        errorMessage.textContent = 'Quota delay must be at least 1000ms.';
+        errorMessage.style.display = 'block';
+        return false;
+    }
+    if (isNaN(chunkCount) || chunkCount < 1) {
+        errorMessage.textContent = 'Number of chunks must be at least 1.';
+        errorMessage.style.display = 'block';
+        return false;
+    }
+    if (!fileInput.files[0]) {
+        errorMessage.textContent = 'Please upload an SRT file.';
+        errorMessage.style.display = 'block';
+        return false;
+    }
 
-            // Reset UI
-            progressContainer.style.display = 'none';
-            downloadLink.style.display = 'none';
-            errorMessage.style.display = 'none';
-            submitButton.disabled = true;
+    // Reset UI
+    progressContainer.style.display = 'none';
+    downloadLink.style.display = 'none';
+    errorMessage.style.display = 'none';
+    submitButton.disabled = true;
 
-            try {
-                const file = fileInput.files[0];
-                const srtContent = await file.text();
-                const parsedEntries = parseSRT(srtContent);
-                const totalEntries = parsedEntries.length;
-                let completed = 0;
-                const translatedEntries = [];
-                const failedEntries = [];
+    try {
+        const file = fileInput.files[0];
+        const srtContent = await file.text();
+        const parsedEntries = parseSRT(srtContent);
+        const totalEntries = parsedEntries.length;
+        let chunks = splitIntoChunks(parsedEntries, chunkCount);
+        const translatedEntries = [];
+        const failedChunks = [];
 
-                progressContainer.style.display = 'block';
+        progressContainer.style.display = 'block';
 
-                for (const entry of parsedEntries) {
-                    let retrying = false;
-                    try {
-                        console.log(\`Translating entry \${entry.id}\`);
-                        const translatedText = await translateText(entry.text, apiKey, baseDelay, quotaDelay, lang);
-                        translatedEntries.push({ id: entry.id, timeStamp: entry.timeStamp, text: translatedText });
-                        console.log(\`Successfully translated entry \${entry.id}\`);
-                    } catch (error) {
-                        console.error(\`Error on entry \${entry.id}: \${error.message}\`);
-                        if (error.message.includes('Quota exceeded. Waiting')) {
-                            retrying = true;
-                            const waitTime = quotaDelay / 1000;
-                            let remainingTime = waitTime;
-                            progressText.textContent = \`Quota exceeded. Retrying in \${remainingTime}s...\`;
-                            const countdown = setInterval(() => {
-                                remainingTime--;
-                                progressText.textContent = \`Quota exceeded. Retrying in \${remainingTime}s...\`;
-                                if (remainingTime <= 0) clearInterval(countdown);
-                            }, 1000);
-                            await new Promise(resolve => setTimeout(resolve, quotaDelay));
-                            const translatedText = await translateText(entry.text, apiKey, baseDelay, quotaDelay);
-                            translatedEntries.push({ id: entry.id, timeStamp: entry.timeStamp, text: translatedText });
-                        } else {
-                            failedEntries.push({ id: entry.id, reason: error.message });
-                            errorMessage.textContent = \`Failed entry \${entry.id}: \${error.message}. Continuing...\`;
-                            errorMessage.style.display = 'block';
-                            continue;
+        for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+            let chunk = chunks[chunkIndex];
+            progressText.textContent = \`Processing chunk \${ chunkIndex + 1 } of \${ chunks.length } (\${ Math.round(chunkIndex / chunks.length * 100) }% complete)\`;
+            let retryCount = 0;
+            const maxRetries = 2; // Increased to 2 retries for mismatch error
+
+            while (retryCount <= maxRetries) {
+                try {
+                    console.log(\`Translating chunk \${ chunkIndex + 1 } with \${ chunk.length } entries(Attempt \${ retryCount + 1})\`);
+                    const translatedLines = await translateChunk(chunk, apiKey, baseDelay, quotaDelay, lang, chunkIndex + 1);
+                    
+                    // Map translated lines back to entries
+                    chunk.forEach((entry, index) => {
+                        translatedEntries.push({
+                            id: entry.id,
+                            timeStamp: entry.timeStamp,
+                            text: translatedLines[index].trim()
+                        });
+                    });
+                    console.log(\`Successfully translated chunk \${ chunkIndex + 1 } \`);
+                    break; // Exit retry loop on success
+                } catch (error) {
+                    console.error(\`Error on chunk \${ chunkIndex + 1 }: \${ error.message } \`);
+                    if (error.message.includes('Quota exceeded. Waiting')) {
+                        const waitTime = quotaDelay / 1000;
+                        let remainingTime = waitTime;
+                        progressText.textContent = \`Quota exceeded in chunk \${ chunkIndex + 1 }.Retrying in \${ remainingTime }s...\`;
+                        const countdown = setInterval(() => {
+                            remainingTime--;
+                            progressText.textContent = \`Quota exceeded in chunk \${ chunkIndex + 1 }.Retrying in \${ remainingTime }s...\`;
+                            if (remainingTime <= 0) clearInterval(countdown);
+                        }, 1000);
+                        await new Promise(resolve => setTimeout(resolve, quotaDelay));
+                        const translatedLines = await translateChunk(chunk, apiKey, baseDelay, quotaDelay, lang, chunkIndex + 1);
+                        chunk.forEach((entry, index) => {
+                            translatedEntries.push({
+                                id: entry.id,
+                                timeStamp: entry.timeStamp,
+                                text: translatedLines[index].trim()
+                            });
+                        });
+                        break; // Exit retry loop on success after quota delay
+                    } else if (error.message.includes('Translation response does not match chunk entry count') && retryCount < maxRetries) {
+                        retryCount++;
+                        progressText.textContent = \`Mismatch in chunk \${ chunkIndex + 1 }.Retrying(Attempt \${ retryCount + 1}/\${maxRetries + 1})...\`;
+                        await new Promise(resolve => setTimeout(resolve, baseDelay));
+                        // If it's the last chunk and still failing, try splitting it further
+                        if (chunkIndex === chunks.length - 1 && retryCount === maxRetries && chunk.length > 1) {
+                            console.log(\`Last chunk \${ chunkIndex + 1 } failing, splitting into smaller chunks\`);
+                            const newChunks = splitIntoChunks(chunk, 2); // Split last chunk into 2
+                            chunks.splice(chunkIndex, 1, ...newChunks); // Replace current chunk with split ones
+                            chunkIndex--; // Step back to process new chunks
+                            break;
                         }
-                    }
-                    if (!retrying) {
-                        completed++;
-                        const percentage = Math.round((completed / totalEntries) * 100);
-                        progressBar.style.width = \`\${percentage}%\`;
-                        progressText.textContent = \`\${percentage}% Complete\`;
+                        continue; // Retry the chunk
+                    } else {
+                        failedChunks.push({ chunk: chunkIndex + 1, reason: error.message });
+                        errorMessage.textContent = \`Failed chunk \${ chunkIndex + 1 } after retries: \${ error.message }. Continuing with original text...\`;
+                        errorMessage.style.display = 'block';
+                        // Add original text for failed chunks
+                        chunk.forEach(entry => {
+                            translatedEntries.push({
+                                id: entry.id,
+                                timeStamp: entry.timeStamp,
+                                text: entry.text // Keep original text for failed chunks
+                            });
+                        });
+                        break; // Move to next chunk
                     }
                 }
-
-                const translatedSRT = reconstructSRT(translatedEntries);
-                const blob = new Blob([translatedSRT], { type: 'application/octet-stream' });
-                const url = URL.createObjectURL(blob);
-                downloadLink.innerHTML = \`<a href="\${url}" download="translated.srt">Download Translated SRT (\${translatedEntries.length} of \${totalEntries} translated)</a>\`;
-                downloadLink.style.display = 'block';
-
-                if (failedEntries.length > 0) {
-                    errorMessage.textContent = \`Translated \${translatedEntries.length} of \${totalEntries} entries. Failed: \${failedEntries.map(e => \`Entry \${e.id} - \${e.reason}\`).join(', ')}\`;
-                    errorMessage.style.display = 'block';
-                } else {
-                    errorMessage.textContent = 'All entries translated successfully!';
-                    errorMessage.style.color = '#44ff44'; // Green for success
-                    errorMessage.style.display = 'block';
-                }
-
-                saveApiKey();
-            } catch (error) {
-                errorMessage.textContent = \`Unexpected error: \${error.message}\`;
-                errorMessage.style.display = 'block';
-            } finally {
-                submitButton.disabled = false;
             }
 
-            return false;
+            const totalProgress = Math.round(((chunkIndex + 1) / chunks.length) * 100);
+            progressBar.style.width = \`\${ totalProgress }% \`;
+            progressText.textContent = \`Processed chunk \${ chunkIndex + 1 } of \${ chunks.length } (\${ totalProgress }% complete)\`;
         }
+
+        const translatedSRT = reconstructSRT(translatedEntries);
+        const blob = new Blob([translatedSRT], { type: 'application/octet-stream' });
+        const url = URL.createObjectURL(blob);
+        downloadLink.innerHTML = \`< a href = "\${url}" download = "translated.srt" > Download Translated SRT(\${ translatedEntries.length } entries, \${ chunks.length - failedChunks.length } of \${ chunks.length } chunks translated)</a > \`;
+        downloadLink.style.display = 'block';
+
+        if (failedChunks.length > 0) {
+            errorMessage.textContent = \`Translated \${ chunks.length - failedChunks.length } of \${ chunks.length } chunks.Failed: \${ failedChunks.map(c => \`Chunk \${c.chunk} - \${c.reason}\`).join(', ') } \`;
+            errorMessage.style.display = 'block';
+        } else {
+            errorMessage.textContent = 'All chunks translated successfully!';
+            errorMessage.style.color = '#44ff44'; // Green for success
+            errorMessage.style.display = 'block';
+        }
+
+        saveApiKey();
+    } catch (error) {
+        errorMessage.textContent = \`Unexpected error: \${ error.message }\`;
+        errorMessage.style.display = 'block';
+    } finally {
+        submitButton.disabled = false;
+    }
+
+    return false;
+}
     </script>
 </body>
 </html>
