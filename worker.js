@@ -583,7 +583,7 @@ function htmlForm() {
         const translatedSRT = reconstructSRT(translatedEntries);
         const blob = new Blob([translatedSRT], { type: 'application/octet-stream' });
         const url = URL.createObjectURL(blob);
-        downloadLink.innerHTML = \`< a href = "\${url}" download = "translated.srt" > Download Translated SRT(\${ translatedEntries.length } entries, \${ chunks.length - failedChunks.length } of \${ chunks.length } chunks translated)</a > \`;
+        downloadLink.innerHTML = \`<a href="\${url}" download="translated.srt"> Download Translated SRT(\${ translatedEntries.length } entries, \${ chunks.length - failedChunks.length } of \${ chunks.length } chunks translated)</a>\`;
         downloadLink.style.display = 'block';
 
         if (failedChunks.length > 0) {
