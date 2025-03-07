@@ -26,7 +26,7 @@ function htmlForm() {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SRT Translator to Persian (Gemini)</title>
+    <title>SRT Translator to Any Language (Gemini)</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <style>
         * {
@@ -252,9 +252,9 @@ function htmlForm() {
 </head>
 <body>
     <div class="container">
-        <h1>SRT Translator to Persian</h1>
+        <h1>SRT Translator to to Any Language</h1>
         <p style="color: #ff4444; font-weight: bold;">⚠️ Please use a VPN to access the Gemini API, as Iran is currently under sanctions.</p>
-        <p>Upload an SRT file and provide your Gemini API key to translate the text to Persian (Farsi).</p>
+        <p>Upload an SRT file and provide your Gemini API key to translate the text to to Any Language.</p>
         <form id="translate-form" onsubmit="return handleTranslate(event)">
             <label for="file">Upload SRT File:</label>
             <input type="file" id="file" name="file" accept=".srt" required>
@@ -273,7 +273,9 @@ function htmlForm() {
             <input type="number" id="base_delay" name="base_delay" min="100" value="4000" placeholder="Base delay in milliseconds" required>
             <label for="quota_delay">Quota Delay (ms):</label>
             <input type="number" id="quota_delay" name="quota_delay" min="1000" value="60000" placeholder="Quota delay in milliseconds" required>
-            <button type="submit">Translate to Persian</button>
+            <label for="lang">Language:</label>
+            <input type="text" id="lang" name="lang" value="Persian (Farsi)" placeholder="Language:">
+            <button type="submit">Translate</button>
         </form>
         <div class="progress-container" id="progress-container">
             <div class="progress-bar">
@@ -340,13 +342,13 @@ function htmlForm() {
             return parsedEntries;
         }
 
-        async function translateText(text, apiKey, baseDelay, quotaDelay) {
+        async function translateText(text, apiKey, baseDelay, quotaDelay, lang) {
             const url = \`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=\${apiKey}\`;
             const headers = { 'Content-Type': 'application/json' };
             const payload = {
                 contents: [{
                     parts: [{
-                        text: \`Translate the following text to Persian (Farsi). Return only the translated text, nothing else:\\n\\n\${text}\`
+                        text: \`Translate the following text to \`+lang+\`. Return only the translated text, nothing else:\\n\\n\${text}\`
                     }]
                 }]
             };
@@ -414,6 +416,7 @@ function htmlForm() {
 
             const fileInput = document.getElementById('file');
             const apiKey = document.getElementById('api_key').value;
+            const lang = document.getElementById('lang').value;
             const baseDelay = parseInt(document.getElementById('base_delay').value, 10);
             const quotaDelay = parseInt(document.getElementById('quota_delay').value, 10);
             const progressContainer = document.getElementById('progress-container');
@@ -461,7 +464,7 @@ function htmlForm() {
                     let retrying = false;
                     try {
                         console.log(\`Translating entry \${entry.id}\`);
-                        const translatedText = await translateText(entry.text, apiKey, baseDelay, quotaDelay);
+                        const translatedText = await translateText(entry.text, apiKey, baseDelay, quotaDelay, lang);
                         translatedEntries.push({ id: entry.id, timeStamp: entry.timeStamp, text: translatedText });
                         console.log(\`Successfully translated entry \${entry.id}\`);
                     } catch (error) {
