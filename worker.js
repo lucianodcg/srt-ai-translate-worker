@@ -285,7 +285,7 @@ function htmlForm() {
             <label for="chunk_count">Number of Chunks:</label>
             <input type="number" id="chunk_count" name="chunk_count" min="1" value="1" placeholder="Number of chunks" required>
             <label for="lang">Language:</label>
-            <input type="text" id="lang" name="lang" value="Persian (Farsi)" placeholder="Language:">
+            <input type="text" id="lang" name="lang" value="Spanish" placeholder="Language:">
             <button type="submit">Translate</button>
         </form>
         <div class="progress-container" id="progress-container">
